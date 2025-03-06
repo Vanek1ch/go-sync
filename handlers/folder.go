@@ -2,8 +2,8 @@ package handlers
 
 import (
 	"fmt"
+	prErr "go-sync/errors"
 	"os"
-	prErr "proj/errors"
 )
 
 type SyncFolders struct {

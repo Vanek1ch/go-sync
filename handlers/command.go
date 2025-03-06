@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"fmt"
-	prErr "proj/errors"
+	e "go-sync/errors"
 )
 
 // predeclared answers
@@ -29,9 +29,9 @@ func CommandHandler(userInput []string) {
 				fmt.Println(EnterValidSyncMode)
 			}
 		} else {
-			fmt.Println(prErr.ErrorCommand)
+			fmt.Println(e.ErrorCommand)
 		}
 	default:
-		fmt.Println(prErr.ErrorCommand)
+		fmt.Println(e.ErrorCommand)
 	}
 }

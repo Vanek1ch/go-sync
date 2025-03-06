@@ -3,8 +3,8 @@ package events
 import (
 	"bufio"
 	"fmt"
+	"go-sync/handlers"
 	"os"
-	"proj/handlers"
 	"strings"
 )
 

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,11 +22,11 @@ type JSONSyncFile struct {
 	SyncType        string     `json:"sync_type"`
 	FirstFolder     string     `json:"first_folder"`
 	LastFolder      string     `json:"last_folder"`
-	ElemList        []*Element `json:"elem_list"` // Используем указатели для эффективности
+	ElemList        []*Element `json:"elem_list"`
 	FirstFolderHash string     `json:"first_folder_hash"`
 	LastFolderHash  string     `json:"last_folder_hash"`
 	LastModified    string     `json:"last_modified"`
-	mu              sync.RWMutex
+	errElems        *ErrorElements
 }
 
 type Element struct {
@@ -38,40 +39,53 @@ type Element struct {
 	Elems        []*Element `json:"elems,omitempty"`
 }
 
+type ErrorElements struct {
+	errs []error
+	mu   sync.RWMutex
+}
+
 func (m *JSONSyncManager) JSONSyncUpdater(folders *SyncFolders) error {
-	rootElement, err := m.elemChecker(folders.FirstFolder)
-	if err != nil {
-		return fmt.Errorf("ошибка при обходе директории: %w", err)
-	}
 
 	newSyncFile := &JSONSyncFile{
 		SyncType:        "solo",
 		FirstFolder:     folders.FirstFolder,
 		LastFolder:      folders.LastFolder,
-		ElemList:        []*Element{rootElement},
+		ElemList:        nil,
 		FirstFolderHash: "example_hash",
 		LastFolderHash:  "example_hash",
 		LastModified:    time.Now().Format(time.RFC3339),
 	}
 
+	newErrorElems := &ErrorElements{}
+
 	m.JSONSFile = newSyncFile
+	newSyncFile.errElems = newErrorElems
 	m.SyncF = folders
+
+	rootElement, err := m.elemChecker(folders.FirstFolder)
+	if err != nil {
+		return err
+	}
+
+	newSyncFile.ElemList = []*Element{rootElement}
 
 	jsonData, err := json.MarshalIndent(newSyncFile, "", "  ")
 	if err != nil {
-		return fmt.Errorf("ошибка при сериализации JSON: %w", err)
+		return errors.New("error marshalling JSON Sync File")
 	}
 
 	if err := os.WriteFile(filepath.Join(folders.FirstFolder, "JSONSync.json"), jsonData, 0644); err != nil {
-		return fmt.Errorf("ошибка при записи файла: %w", err)
+		return errors.New("error writing JSON Sync File")
 	}
 
 	fmt.Println("Файл JSONSync.JSON успешно создан, приступаю к копированию файлов...")
 
-	err = m.CopyFile(m.JSONSFile.ElemList[0])
-	if err != nil {
-		fmt.Printf("Ошибка копирования файла: %v\n", err)
-		return err
+	m.CopyFile(m.JSONSFile.ElemList[0])
+
+	if len(m.JSONSFile.errElems.errs) > 0 {
+		for _, errs := range m.JSONSFile.errElems.errs {
+			fmt.Println(errs)
+		}
 	}
 
 	return nil
@@ -79,6 +93,11 @@ func (m *JSONSyncManager) JSONSyncUpdater(folders *SyncFolders) error {
 
 func (m *JSONSyncManager) elemChecker(path string) (*Element, error) {
 	dirInfo, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := os.ReadDir(path)
 	if err != nil {
 		return nil, err
 	}
@@ -93,14 +112,8 @@ func (m *JSONSyncManager) elemChecker(path string) (*Element, error) {
 		Elems:        make([]*Element, 0),
 	}
 
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return nil, err
-	}
-
 	var wg sync.WaitGroup
 	dirChan := make(chan *Element)
-	errChan := make(chan error)
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -109,7 +122,9 @@ func (m *JSONSyncManager) elemChecker(path string) (*Element, error) {
 				defer wg.Done()
 				elem, err := m.elemChecker(filepath.Join(path, e.Name()))
 				if err != nil {
-					errChan <- fmt.Errorf("директория %s: %w", e.Name(), err)
+					m.JSONSFile.errElems.mu.Lock()
+					defer m.JSONSFile.errElems.mu.Unlock()
+					m.JSONSFile.errElems.errs = append(m.JSONSFile.errElems.errs, err)
 					return
 				}
 				dirChan <- elem
@@ -139,95 +154,93 @@ func (m *JSONSyncManager) elemChecker(path string) (*Element, error) {
 	go func() {
 		wg.Wait()
 		close(dirChan)
-		close(errChan)
 	}()
 
 	for elem := range dirChan {
 		currentElement.Elems = append(currentElement.Elems, elem)
 	}
 
-	if len(errChan) > 0 {
-		for err := range errChan {
-			return nil, err
-		}
-	}
-
 	return currentElement, nil
 }
 
-func (m *JSONSyncManager) CopyFile(element *Element) (err error) {
+func (m *JSONSyncManager) CopyFile(element *Element) {
 	hostFolder := m.SyncF.FirstFolder
 	_, elemRouteWithoutHostFolder, _ := strings.Cut(element.Route, hostFolder)
 	dst := path.Join(m.SyncF.LastFolder, elemRouteWithoutHostFolder)
-
-	var wg sync.WaitGroup
-	errChan := make(chan error)
 
 	for _, elem := range element.Elems {
 		src := path.Join(elem.Route)
 		sfi, err := os.Stat(src)
 		if err != nil {
-			return fmt.Errorf("failed to stat source: %w", err)
+			m.JSONSFile.errElems.mu.Lock()
+			m.JSONSFile.errElems.errs = append(m.JSONSFile.errElems.errs, err)
+			m.JSONSFile.errElems.mu.Unlock()
+			continue
 		}
 
 		if sfi.IsDir() {
 			relPath, err := filepath.Rel(hostFolder, elem.Route)
 			if err != nil {
-				return fmt.Errorf("failed to get relative path: %w", err)
+				m.JSONSFile.errElems.mu.Lock()
+				m.JSONSFile.errElems.errs = append(m.JSONSFile.errElems.errs, err)
+				m.JSONSFile.errElems.mu.Unlock()
+				continue
 			}
 
 			dstDir := filepath.Join(dst, relPath)
 			if err := os.MkdirAll(dstDir, 0755); err != nil {
-				return fmt.Errorf("failed to create directory: %w", err)
+				m.JSONSFile.errElems.mu.Lock()
+				m.JSONSFile.errElems.errs = append(m.JSONSFile.errElems.errs, err)
+				m.JSONSFile.errElems.mu.Unlock()
+				continue
 			}
 
-			wg.Add(1)
-			go func(e *Element) {
-				defer wg.Done()
-				if err := m.CopyFile(e); err != nil {
-					errChan <- err
-				}
-			}(elem)
 		} else if sfi.Mode().IsRegular() { // Если это обычный файл
 			dstFile := filepath.Join(dst, filepath.Base(src))
 
 			dfi, err := os.Stat(dstFile)
 			if err == nil {
 				if !dfi.Mode().IsRegular() {
-					return fmt.Errorf("destination is not a regular file: %s", dstFile)
+					m.JSONSFile.errElems.mu.Lock()
+					m.JSONSFile.errElems.errs = append(m.JSONSFile.errElems.errs, err)
+					m.JSONSFile.errElems.mu.Unlock()
+					continue
 				}
 				if os.SameFile(sfi, dfi) {
 					continue
 				}
 			} else if !os.IsNotExist(err) {
-				return fmt.Errorf("failed to stat destination: %w", err)
+				m.JSONSFile.errElems.mu.Lock()
+				m.JSONSFile.errElems.errs = append(m.JSONSFile.errElems.errs, err)
+				m.JSONSFile.errElems.mu.Unlock()
+				continue
 			}
 
 			if err := copyFileContents(src, dstFile); err != nil {
-				return fmt.Errorf("failed to copy file contents: %w", err)
+				m.JSONSFile.errElems.mu.Lock()
+				m.JSONSFile.errElems.errs = append(m.JSONSFile.errElems.errs, err)
+				m.JSONSFile.errElems.mu.Unlock()
+				continue
 			}
 		} else {
-			return fmt.Errorf("unsupported file type: %s (%q)", src, sfi.Mode().String())
+			m.JSONSFile.errElems.mu.Lock()
+			m.JSONSFile.errElems.errs = append(m.JSONSFile.errElems.errs, err)
+			m.JSONSFile.errElems.mu.Unlock()
+			continue
 		}
 
 	}
-
-	go func() {
-		wg.Wait()
-		close(errChan)
-	}()
-	return <-errChan
 
 }
 func copyFileContents(src, dst string) (err error) {
 	in, err := os.Open(src)
 	if err != nil {
-		return
+		return err
 	}
 	defer in.Close()
 	out, err := os.Create(dst)
 	if err != nil {
-		return
+		return err
 	}
 	defer func() {
 		cerr := out.Close()
@@ -236,12 +249,13 @@ func copyFileContents(src, dst string) (err error) {
 		}
 	}()
 	if _, err = io.Copy(out, in); err != nil {
-		return
+		return err
 	}
 	err = out.Sync()
-	return
+	return err
 }
 
-func removeFiles(dir string) error {
+/*func removeFiles(dir string) error {
 	return nil
 }
+*/

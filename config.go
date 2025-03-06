@@ -1,6 +1,6 @@
 package main
 
-import "proj/handlers"
+import "go-sync/handlers"
 
 type AppManager struct {
 	Version      string

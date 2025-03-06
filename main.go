@@ -1,17 +1,19 @@
 package main
 
 import (
-	"proj/handlers"
+	"fmt"
+	"go-sync/handlers"
+	"runtime"
 )
 
 func main() {
-
-	newFolder := &handlers.SyncFolders{FirstFolder: "D:\\exampleRoute1", LastFolder: "D:\\exampleRoute2"}
-	newSyncManager := handlers.JSONSyncManager{}
+	runtime.GOMAXPROCS(4)
+	newFolder := &handlers.SyncFolders{FirstFolder: "C:\\Program Files\\Mozilla Firefox", LastFolder: "C:\\Program Files\\folder2"}
+	newSyncManager := &handlers.JSONSyncManager{}
 
 	err := newSyncManager.JSONSyncUpdater(newFolder)
 	if err != nil {
-		return
+		fmt.Print(err)
 	}
 
 	//eventMainLoop()
